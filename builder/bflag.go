@@ -5,6 +5,8 @@ import (
 	"strings"
 )
 
+var new_var = 1
+
 // FlagType is the type of the build flag
 type FlagType int
 

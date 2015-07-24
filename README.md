@@ -17,7 +17,6 @@ powers [dotCloud](https://dotcloud.com), a popular Platform-as-a-Service.
 It benefits directly from the experience accumulated over several years
 of large-scale operation and support of hundreds of thousands of
 applications and databases.
-
 ![Docker L](docs/static_files/docker-logo-compressed.png "Docker")
 
 ## Security Disclosure
