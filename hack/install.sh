@@ -140,12 +140,12 @@ do_install() {
 	fi
 	if [ -z "$lsb_dist" ] && [ -r /etc/fedora-release ]; then
 		lsb_dist='fedora'
-		dist_version="$(rpm -qa \*-release | cut -d"-" -f3)"
+		dist_version="$(rpm -qa \*-release | cut -d"-" -f3 | head -n1)"
 	fi
 	if [ -z "$lsb_dist" ]; then
 		if [ -r /etc/centos-release ] || [ -r /etc/redhat-release ]; then
 			lsb_dist='centos'
-			dist_version="$(rpm -qa \*-release | cut -d"-" -f3)"
+			dist_version="$(rpm -qa \*-release | cut -d"-" -f3 | head -n1)"
 		fi
 	fi
 	if [ -z "$lsb_dist" ] && [ -r /etc/os-release ]; then
@@ -164,7 +164,7 @@ do_install() {
 			exit 0
 			;;
 
-		'opensuse project'|opensuse|'suse linux'|sled)
+		'opensuse project'|opensuse|'suse linux'|sle[sd])
 			(
 				set -x
 				$sh_c 'sleep 3; zypper -n install docker'

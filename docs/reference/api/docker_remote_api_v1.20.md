@@ -1273,6 +1273,7 @@ Query Parameters:
 -   **filters** – a JSON encoded value of the filters (a map[string][]string) to process on the images list. Available filters:
   -   `dangling=true`
   -   `label=key` or `key=value` of an image label
+-   **filter** - only return images with the specified name
 
 ### Build image from a Dockerfile
 
@@ -2268,4 +2269,4 @@ To set cross origin requests to the remote api please give values to
 `--api-cors-header` when running Docker in daemon mode. Set * (asterisk) allows all,
 default or blank means CORS disabled
 
-    $ docker -d -H="192.168.1.9:2375" --api-cors-header="http://foo.bar"
+    $ docker daemon -H="192.168.1.9:2375" --api-cors-header="http://foo.bar"
