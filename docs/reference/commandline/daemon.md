@@ -5,6 +5,7 @@ description = "The daemon command description and usage"
 keywords = ["container, daemon, runtime"]
 [menu.main]
 parent = "smn_cli"
+weight=1
 +++
 <![end-metadata]-->
 
@@ -32,7 +33,7 @@ parent = "smn_cli"
       -G, --group="docker"                   Group for the unix socket
       -g, --graph="/var/lib/docker"          Root of the Docker runtime
       -H, --host=[]                          Daemon socket(s) to connect to
-      -h, --help=false                       Print usage
+      --help=false                           Print usage
       --icc=true                             Enable inter-container communication
       --insecure-registry=[]                 Enable insecure registry communication
       --ip=0.0.0.0                           Default IP when binding container ports
@@ -233,7 +234,7 @@ options for `zfs` start with `zfs`.
     >**Note**: This option configures devicemapper loopback, which should not be used in production.
 
     Specifies the size to use when creating the loopback file for the
-    "metadadata" device which is used for the thin pool. The default size
+    "metadata" device which is used for the thin pool. The default size
     is 2G. The file is sparse, so it will not initially take up
     this much space.
 
@@ -357,9 +358,6 @@ options for `zfs` start with `zfs`.
     > Otherwise, set this flag for migrating existing Docker daemons to
     > a daemon with a supported environment.
 
-
-## Docker execdriver option
-
 Currently supported options of `zfs`:
 
  * `zfs.fsname`
@@ -477,15 +475,15 @@ please check the [run](run.md) reference.
 
 IP masquerading uses address translation to allow containers without a public
 IP to talk to other machines on the Internet. This may interfere with some
-network topologies and can be disabled with --ip-masq=false.
+network topologies and can be disabled with `--ip-masq=false`.
 
 Docker supports softlinks for the Docker data directory (`/var/lib/docker`) and
 for `/var/lib/docker/tmp`. The `DOCKER_TMPDIR` and the data directory can be
 set like this:
 
-    DOCKER_TMPDIR=/mnt/disk2/tmp /usr/local/bin/docker daemon -D -g /var/lib/docker -H unix:// > /var/lib/boot2docker/docker.log 2>&1
+    DOCKER_TMPDIR=/mnt/disk2/tmp /usr/local/bin/docker daemon -D -g /var/lib/docker -H unix:// > /var/lib/docker-machine/docker.log 2>&1
     # or
     export DOCKER_TMPDIR=/mnt/disk2/tmp
-    /usr/local/bin/docker daemon -D -g /var/lib/docker -H unix:// > /var/lib/boot2docker/docker.log 2>&1
+    /usr/local/bin/docker daemon -D -g /var/lib/docker -H unix:// > /var/lib/docker-machine/docker.log 2>&1
 
 

@@ -49,6 +49,11 @@ List containers
                      "Created": 1367854155,
                      "Status": "Exit 0",
                      "Ports": [{"PrivatePort": 2222, "PublicPort": 3333, "Type": "tcp"}],
+                     "Labels": {
+                             "com.example.vendor": "Acme",
+                             "com.example.license": "GPL",
+                             "com.example.version": "1.0"
+                     },
                      "SizeRw": 12288,
                      "SizeRootFs": 0
              },
@@ -60,6 +65,7 @@ List containers
                      "Created": 1367854155,
                      "Status": "Exit 0",
                      "Ports": [],
+                     "Labels": {},
                      "SizeRw": 12288,
                      "SizeRootFs": 0
              },
@@ -71,6 +77,7 @@ List containers
                      "Created": 1367854154,
                      "Status": "Exit 0",
                      "Ports":[],
+                     "Labels": {},
                      "SizeRw":12288,
                      "SizeRootFs":0
              },
@@ -82,6 +89,7 @@ List containers
                      "Created": 1367854152,
                      "Status": "Exit 0",
                      "Ports": [],
+                     "Labels": {},
                      "SizeRw": 12288,
                      "SizeRootFs": 0
              }
@@ -102,7 +110,7 @@ Query Parameters:
 -   **filters** - a json encoded value of the filters (a map[string][]string) to process on the containers list. Available filters:
   -   exited=&lt;int&gt; -- containers with exit code of &lt;int&gt;
   -   status=(restarting|running|paused|exited)
-  -   label=`key` or `key=value` of a container label
+  -   label=`key` or `label="key=value"` of a container label
 
 Status Codes:
 
@@ -1126,7 +1134,7 @@ Query Parameters:
 -   **all** – 1/True/true or 0/False/false, default false
 -   **filters** – a json encoded value of the filters (a map[string][]string) to process on the images list. Available filters:
   -   dangling=true
-  -   label=`key` or `key=value` of an image label
+  -   label=`key` or `label="key=value"` of an image label
 -   **filter** - only return images with the specified name
 
 ### Build image from a Dockerfile

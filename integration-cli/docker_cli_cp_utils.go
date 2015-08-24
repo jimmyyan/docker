@@ -74,8 +74,11 @@ var defaultFileData = []fileData{
 	{ftRegular, "dir4/file3-1", "file4-1"},
 	{ftRegular, "dir4/file3-2", "file4-2"},
 	{ftDir, "dir5", ""},
-	{ftSymlink, "symlink1", "target1"},
-	{ftSymlink, "symlink2", "target2"},
+	{ftSymlink, "symlinkToFile1", "file1"},
+	{ftSymlink, "symlinkToDir1", "dir1"},
+	{ftSymlink, "brokenSymlinkToFileX", "fileX"},
+	{ftSymlink, "brokenSymlinkToDirX", "dirX"},
+	{ftSymlink, "symlinkToAbsDir", "/root"},
 }
 
 func defaultMkContentCommand() string {
@@ -157,7 +160,7 @@ func makeTestContainer(c *check.C, options testContainerOptions) (containerID st
 		if status != 0 {
 			logs = "UNABLE TO GET LOGS"
 		}
-		c.Fatalf("failed to make test container, exit code (%d): %s", exitCode, logs)
+		c.Fatalf("failed to make test container, exit code (%s): %s", exitCode, logs)
 	}
 
 	return
@@ -266,6 +269,21 @@ func fileContentEquals(c *check.C, filename, contents string) (err error) {
 	}
 
 	return
+}
+
+func symlinkTargetEquals(c *check.C, symlink, expectedTarget string) (err error) {
+	c.Logf("checking that the symlink %q points to %q\n", symlink, expectedTarget)
+
+	actualTarget, err := os.Readlink(symlink)
+	if err != nil {
+		return err
+	}
+
+	if actualTarget != expectedTarget {
+		return fmt.Errorf("symlink target points to %q not %q", actualTarget, expectedTarget)
+	}
+
+	return nil
 }
 
 func containerStartOutputEquals(c *check.C, cID, contents string) (err error) {

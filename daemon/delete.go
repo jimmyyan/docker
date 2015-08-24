@@ -4,7 +4,6 @@ import (
 	"fmt"
 	"os"
 	"path"
-	"runtime"
 
 	"github.com/Sirupsen/logrus"
 )
@@ -32,14 +31,16 @@ func (daemon *Daemon) ContainerRm(name string, config *ContainerRmConfig) error 
 		if pe == nil {
 			return fmt.Errorf("Cannot get parent %s for name %s", parent, name)
 		}
-		parentContainer, _ := daemon.Get(pe.ID())
 
 		if err := daemon.ContainerGraph().Delete(name); err != nil {
 			return err
 		}
 
+		parentContainer, _ := daemon.Get(pe.ID())
 		if parentContainer != nil {
-			parentContainer.DisableLink(n)
+			if err := parentContainer.UpdateNetwork(); err != nil {
+				logrus.Debugf("Could not update network to remove link %s: %v", n, err)
+			}
 		}
 
 		return nil
@@ -115,12 +116,9 @@ func (daemon *Daemon) rm(container *Container, forceRemove bool) (err error) {
 		return fmt.Errorf("Driver %s failed to remove root filesystem %s: %s", daemon.driver, container.ID, err)
 	}
 
-	// There will not be an -init on Windows, so don't fail by not attempting to delete it
-	if runtime.GOOS != "windows" {
-		initID := fmt.Sprintf("%s-init", container.ID)
-		if err := daemon.driver.Remove(initID); err != nil {
-			return fmt.Errorf("Driver %s failed to remove init filesystem %s: %s", daemon.driver, initID, err)
-		}
+	initID := fmt.Sprintf("%s-init", container.ID)
+	if err := daemon.driver.Remove(initID); err != nil {
+		return fmt.Errorf("Driver %s failed to remove init filesystem %s: %s", daemon.driver, initID, err)
 	}
 
 	if err = os.RemoveAll(container.root); err != nil {

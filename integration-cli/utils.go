@@ -196,10 +196,14 @@ func waitForContainer(contID string, args ...string) error {
 	return nil
 }
 
+// waitRun will wait for the specified container to be running, maximum 5 seconds.
 func waitRun(contID string) error {
 	return waitInspect(contID, "{{.State.Running}}", "true", 5)
 }
 
+// waitInspect will wait for the specified container to have the specified string
+// in the inspect output. It will wait until the specified timeout (in seconds)
+// is reached.
 func waitInspect(name, expr, expected string, timeout int) error {
 	after := time.After(time.Duration(timeout) * time.Second)
 
@@ -333,4 +337,18 @@ func (c *channelBuffer) ReadTimeout(p []byte, n time.Duration) (int, error) {
 	case <-time.After(n):
 		return -1, fmt.Errorf("timeout reading from channel")
 	}
+}
+
+func runAtDifferentDate(date time.Time, block func()) {
+	// Layout for date. MMDDhhmmYYYY
+	const timeLayout = "010203042006"
+	// Ensure we bring time back to now
+	now := time.Now().Format(timeLayout)
+	dateReset := exec.Command("date", now)
+	defer runCommand(dateReset)
+
+	dateChange := exec.Command("date", date.Format(timeLayout))
+	runCommand(dateChange)
+	block()
+	return
 }

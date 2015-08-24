@@ -27,7 +27,9 @@ func (dcs dumbCredentialStore) Basic(*url.URL) (string, string) {
 	return dcs.auth.Username, dcs.auth.Password
 }
 
-// v2 only
+// NewV2Repository returns a repository (v2 only). It creates a HTTP transport
+// providing timeout settings and authentication support, and also verifies the
+// remote API version.
 func NewV2Repository(repoInfo *registry.RepositoryInfo, endpoint registry.APIEndpoint, metaHeaders http.Header, authConfig *cliconfig.AuthConfig) (distribution.Repository, error) {
 	ctx := context.Background()
 
@@ -97,15 +99,15 @@ func NewV2Repository(repoInfo *registry.RepositoryInfo, endpoint registry.APIEnd
 	return client.NewRepository(ctx, repoName, endpoint.URL, tr)
 }
 
-func digestFromManifest(m *manifest.SignedManifest, localName string) (digest.Digest, error) {
+func digestFromManifest(m *manifest.SignedManifest, localName string) (digest.Digest, int, error) {
 	payload, err := m.Payload()
 	if err != nil {
 		logrus.Debugf("could not retrieve manifest payload: %v", err)
-		return "", err
+		return "", 0, err
 	}
 	manifestDigest, err := digest.FromBytes(payload)
 	if err != nil {
 		logrus.Infof("Could not compute manifest digest for %s:%s : %v", localName, m.Tag, err)
 	}
-	return manifestDigest, nil
+	return manifestDigest, len(payload), nil
 }

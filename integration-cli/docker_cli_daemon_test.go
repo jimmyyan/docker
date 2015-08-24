@@ -1,4 +1,4 @@
-// +build daemon
+// +build daemon,!windows
 
 package main
 
@@ -633,7 +633,7 @@ func (s *DockerDaemonSuite) TestDaemonBridgeIP(c *check.C) {
 	// 3. Check if the bip config has taken effect using ifconfig and iptables commands
 	// 4. Launch a Container and make sure the IP-Address is in the expected subnet
 	// 5. Delete the docker0 Bridge
-	// 6. Restart the Docker Daemon (via defered action)
+	// 6. Restart the Docker Daemon (via deferred action)
 	//    This Restart takes care of bringing docker0 interface back to auto-assigned IP
 
 	defaultNetworkBridge := "docker0"
@@ -778,6 +778,18 @@ func (s *DockerDaemonSuite) TestDaemonDefaultGatewayIPv4Explicit(c *check.C) {
 		check.Commentf("Explicit default gateway should be %s, but default route was '%s'",
 			gatewayIP, strings.TrimSpace(out)))
 	deleteInterface(c, defaultNetworkBridge)
+}
+
+func (s *DockerDaemonSuite) TestDaemonDefaultGatewayIPv4ExplicitOutsideContainerSubnet(c *check.C) {
+	defaultNetworkBridge := "docker0"
+	deleteInterface(c, defaultNetworkBridge)
+
+	// Program a custom default gateway outside of the container subnet, daemon should accept it and start
+	err := s.d.StartWithBusybox("--bip", "172.16.0.10/16", "--fixed-cidr", "172.16.1.0/24", "--default-gateway", "172.16.0.254")
+	c.Assert(err, check.IsNil)
+
+	deleteInterface(c, defaultNetworkBridge)
+	s.d.Restart()
 }
 
 func (s *DockerDaemonSuite) TestDaemonIP(c *check.C) {
@@ -1318,6 +1330,14 @@ func (s *DockerDaemonSuite) TestHttpsInfo(c *check.C) {
 	}
 }
 
+// TestTlsVerify verifies that --tlsverify=false turns on tls
+func (s *DockerDaemonSuite) TestTlsVerify(c *check.C) {
+	out, err := exec.Command(dockerBinary, "daemon", "--tlsverify=false").CombinedOutput()
+	if err == nil || !strings.Contains(string(out), "Could not load X509 key pair") {
+		c.Fatalf("Daemon should not have started due to missing certs: %v\n%s", err, string(out))
+	}
+}
+
 // TestHttpsInfoRogueCert connects via two-way authenticated HTTPS to the info endpoint
 // by using a rogue client certificate and checks that it fails with the expected error.
 func (s *DockerDaemonSuite) TestHttpsInfoRogueCert(c *check.C) {
@@ -1369,7 +1389,7 @@ func pingContainers(c *check.C, d *Daemon, expectFailure bool) {
 	args = append(dargs, "run", "--rm", "--link", "container1:alias1", "busybox", "sh", "-c")
 	pingCmd := "ping -c 1 %s -W 1"
 	args = append(args, fmt.Sprintf(pingCmd, "alias1"))
-	_, _, err := dockerCmdWithError(c, args...)
+	_, _, err := dockerCmdWithError(args...)
 
 	if expectFailure {
 		c.Assert(err, check.NotNil)
@@ -1506,4 +1526,47 @@ func teardownV6() error {
 		return err
 	}
 	return nil
+}
+
+func (s *DockerDaemonSuite) TestDaemonRestartWithContainerWithRestartPolicyAlways(c *check.C) {
+	c.Assert(s.d.StartWithBusybox(), check.IsNil)
+
+	out, err := s.d.Cmd("run", "-d", "--restart", "always", "busybox", "top")
+	c.Assert(err, check.IsNil)
+	id := strings.TrimSpace(out)
+
+	_, err = s.d.Cmd("stop", id)
+	c.Assert(err, check.IsNil)
+	_, err = s.d.Cmd("wait", id)
+	c.Assert(err, check.IsNil)
+
+	out, err = s.d.Cmd("ps", "-q")
+	c.Assert(err, check.IsNil)
+	c.Assert(out, check.Equals, "")
+
+	c.Assert(s.d.Restart(), check.IsNil)
+
+	out, err = s.d.Cmd("ps", "-q")
+	c.Assert(err, check.IsNil)
+	c.Assert(strings.TrimSpace(out), check.Equals, id[:12])
+}
+
+func (s *DockerDaemonSuite) TestDaemonCorruptedSyslogAddress(c *check.C) {
+	c.Assert(s.d.Start("--log-driver=syslog", "--log-opt", "syslog-address=corrupted:1234"), check.NotNil)
+	runCmd := exec.Command("grep", "Failed to set log opts: syslog-address should be in form proto://address", s.d.LogfileName())
+	if out, _, err := runCommandWithOutput(runCmd); err != nil {
+		c.Fatalf("Expected 'Error starting daemon' message; but doesn't exist in log: %q, err: %v", out, err)
+	}
+}
+
+func (s *DockerDaemonSuite) TestDaemonWideLogConfig(c *check.C) {
+	c.Assert(s.d.Start("--log-driver=json-file", "--log-opt=max-size=1k"), check.IsNil)
+	out, err := s.d.Cmd("run", "-d", "--name=logtest", "busybox", "top")
+	c.Assert(err, check.IsNil, check.Commentf("Output: %s, err: %v", out, err))
+	out, err = s.d.Cmd("inspect", "-f", "{{ .HostConfig.LogConfig.Config }}", "logtest")
+	c.Assert(err, check.IsNil, check.Commentf("Output: %s", out))
+	cfg := strings.TrimSpace(out)
+	if cfg != "map[max-size:1k]" {
+		c.Fatalf("Unexpected log-opt: %s, expected map[max-size:1k]", cfg)
+	}
 }

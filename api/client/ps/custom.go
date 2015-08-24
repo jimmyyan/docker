@@ -64,6 +64,9 @@ func (c *containerContext) Image() string {
 	if c.c.Image == "" {
 		return "<no image>"
 	}
+	if c.trunc {
+		return stringutils.Truncate(c.c.Image, 12)
+	}
 	return c.c.Image
 }
 
@@ -170,9 +173,11 @@ func customFormat(ctx Context, containers []types.Container) {
 		format += "\t{{.Size}}"
 	}
 
-	tmpl, err := template.New("ps template").Parse(format)
+	tmpl, err := template.New("").Parse(format)
 	if err != nil {
-		buffer.WriteString(fmt.Sprintf("Invalid `docker ps` format: %v\n", err))
+		buffer.WriteString(fmt.Sprintf("Template parsing error: %v\n", err))
+		buffer.WriteTo(ctx.Output)
+		return
 	}
 
 	for _, container := range containers {
@@ -181,8 +186,9 @@ func customFormat(ctx Context, containers []types.Container) {
 			c:     container,
 		}
 		if err := tmpl.Execute(buffer, containerCtx); err != nil {
-			buffer = bytes.NewBufferString(fmt.Sprintf("Invalid `docker ps` format: %v\n", err))
-			break
+			buffer = bytes.NewBufferString(fmt.Sprintf("Template parsing error: %v\n", err))
+			buffer.WriteTo(ctx.Output)
+			return
 		}
 		if table && len(header) == 0 {
 			header = containerCtx.fullHeader()

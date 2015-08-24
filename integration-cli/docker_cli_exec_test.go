@@ -148,7 +148,7 @@ func (s *DockerSuite) TestExecPausedContainer(c *check.C) {
 	ContainerID := strings.TrimSpace(out)
 
 	dockerCmd(c, "pause", "testing")
-	out, _, err := dockerCmdWithError(c, "exec", "-i", "-t", ContainerID, "echo", "hello")
+	out, _, err := dockerCmdWithError("exec", "-i", "-t", ContainerID, "echo", "hello")
 	if err == nil {
 		c.Fatal("container should fail to exec new command if it is paused")
 	}
@@ -186,13 +186,7 @@ func (s *DockerSuite) TestExecTtyCloseStdin(c *check.C) {
 func (s *DockerSuite) TestExecTtyWithoutStdin(c *check.C) {
 	out, _ := dockerCmd(c, "run", "-d", "-ti", "busybox")
 	id := strings.TrimSpace(out)
-	if err := waitRun(id); err != nil {
-		c.Fatal(err)
-	}
-
-	defer func() {
-		dockerCmd(c, "kill", id)
-	}()
+	c.Assert(waitRun(id), check.IsNil)
 
 	errChan := make(chan error)
 	go func() {
@@ -272,7 +266,7 @@ func (s *DockerSuite) TestExecCgroup(c *check.C) {
 	for i := 0; i < 5; i++ {
 		wg.Add(1)
 		go func() {
-			out, _, err := dockerCmdWithError(c, "exec", "testing", "cat", "/proc/self/cgroup")
+			out, _, err := dockerCmdWithError("exec", "testing", "cat", "/proc/self/cgroup")
 			if err != nil {
 				errChan <- err
 				return
@@ -320,9 +314,9 @@ func (s *DockerSuite) TestInspectExecID(c *check.C) {
 		c.Fatalf("ExecIDs should be empty, got: %s", out)
 	}
 
-	// Start an exec, have it block waiting for input so we can do some checking
-	cmd := exec.Command(dockerBinary, "exec", "-i", id, "sh", "-c", "read a")
-	execStdin, _ := cmd.StdinPipe()
+	// Start an exec, have it block waiting so we can do some checking
+	cmd := exec.Command(dockerBinary, "exec", id, "sh", "-c",
+		"while ! test -e /tmp/execid1; do sleep 1; done")
 
 	if err = cmd.Start(); err != nil {
 		c.Fatalf("failed to start the exec cmd: %q", err)
@@ -353,8 +347,15 @@ func (s *DockerSuite) TestInspectExecID(c *check.C) {
 		c.Fatalf("failed to get the exec id: %v", err)
 	}
 
-	// End the exec by closing its stdin, and wait for it to end
-	execStdin.Close()
+	// End the exec by creating the missing file
+	err = exec.Command(dockerBinary, "exec", id,
+		"sh", "-c", "touch /tmp/execid1").Run()
+
+	if err != nil {
+		c.Fatalf("failed to run the 2nd exec cmd: %q", err)
+	}
+
+	// Wait for 1st exec to complete
 	cmd.Wait()
 
 	// All execs for the container should be gone now
@@ -372,6 +373,17 @@ func (s *DockerSuite) TestInspectExecID(c *check.C) {
 	sc, body, err := sockRequest("GET", "/exec/"+execID+"/json", nil)
 	if sc != http.StatusOK {
 		c.Fatalf("received status != 200 OK: %d\n%s", sc, body)
+	}
+
+	// Now delete the container and then an 'inspect' on the exec should
+	// result in a 404 (not 'container not running')
+	out, ec := dockerCmd(c, "rm", "-f", id)
+	if ec != 0 {
+		c.Fatalf("error removing container: %s", out)
+	}
+	sc, body, err = sockRequest("GET", "/exec/"+execID+"/json", nil)
+	if sc != http.StatusNotFound {
+		c.Fatalf("received status != 404: %d\n%s", sc, body)
 	}
 }
 
@@ -518,6 +530,44 @@ func (s *DockerSuite) TestExecWithUser(c *check.C) {
 	}
 }
 
+func (s *DockerSuite) TestExecWithPrivileged(c *check.C) {
+
+	// Start main loop which attempts mknod repeatedly
+	dockerCmd(c, "run", "-d", "--name", "parent", "--cap-drop=ALL", "busybox", "sh", "-c", `while (true); do if [ -e /exec_priv ]; then cat /exec_priv && mknod /tmp/sda b 8 0 && echo "Success"; else echo "Privileged exec has not run yet"; fi; usleep 10000; done`)
+
+	// Check exec mknod doesn't work
+	cmd := exec.Command(dockerBinary, "exec", "parent", "sh", "-c", "mknod /tmp/sdb b 8 16")
+	out, _, err := runCommandWithOutput(cmd)
+	if err == nil || !strings.Contains(out, "Operation not permitted") {
+		c.Fatalf("exec mknod in --cap-drop=ALL container without --privileged should fail")
+	}
+
+	// Check exec mknod does work with --privileged
+	cmd = exec.Command(dockerBinary, "exec", "--privileged", "parent", "sh", "-c", `echo "Running exec --privileged" > /exec_priv && mknod /tmp/sdb b 8 16 && usleep 50000 && echo "Finished exec --privileged" > /exec_priv && echo ok`)
+	out, _, err = runCommandWithOutput(cmd)
+	if err != nil {
+		c.Fatal(err, out)
+	}
+
+	if actual := strings.TrimSpace(out); actual != "ok" {
+		c.Fatalf("exec mknod in --cap-drop=ALL container with --privileged failed: %v, output: %q", err, out)
+	}
+
+	// Check subsequent unprivileged exec cannot mknod
+	cmd = exec.Command(dockerBinary, "exec", "parent", "sh", "-c", "mknod /tmp/sdc b 8 32")
+	out, _, err = runCommandWithOutput(cmd)
+	if err == nil || !strings.Contains(out, "Operation not permitted") {
+		c.Fatalf("repeating exec mknod in --cap-drop=ALL container after --privileged without --privileged should fail")
+	}
+
+	// Confirm at no point was mknod allowed
+	logCmd := exec.Command(dockerBinary, "logs", "parent")
+	if out, _, err := runCommandWithOutput(logCmd); err != nil || strings.Contains(out, "Success") {
+		c.Fatal(out, err)
+	}
+
+}
+
 func (s *DockerSuite) TestExecWithImageUser(c *check.C) {
 	name := "testbuilduser"
 	_, err := buildImage(name,
@@ -534,5 +584,23 @@ func (s *DockerSuite) TestExecWithImageUser(c *check.C) {
 	out, _ := dockerCmd(c, "exec", "dockerioexec", "whoami")
 	if !strings.Contains(out, "dockerio") {
 		c.Fatalf("exec with user by id expected dockerio user got %s", out)
+	}
+}
+
+func (s *DockerSuite) TestExecOnReadonlyContainer(c *check.C) {
+	dockerCmd(c, "run", "-d", "--read-only", "--name", "parent", "busybox", "top")
+	if _, status := dockerCmd(c, "exec", "parent", "true"); status != 0 {
+		c.Fatalf("exec into a read-only container failed with exit status %d", status)
+	}
+}
+
+// #15750
+func (s *DockerSuite) TestExecStartFails(c *check.C) {
+	name := "exec-15750"
+	dockerCmd(c, "run", "-d", "--name", name, "busybox", "top")
+
+	_, errmsg, status := dockerCmdWithStdoutStderr(nil, "exec", name, "no-such-cmd")
+	if status == 255 && !strings.Contains(errmsg, "executable file not found") {
+		c.Fatal("exec error message not received. The daemon might had crashed")
 	}
 }

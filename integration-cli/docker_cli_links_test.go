@@ -6,12 +6,11 @@ import (
 	"reflect"
 	"regexp"
 	"strings"
-	"time"
 )
 
 func (s *DockerSuite) TestLinksPingUnlinkedContainers(c *check.C) {
 
-	_, exitCode, err := dockerCmdWithError(c, "run", "--rm", "busybox", "sh", "-c", "ping -c 1 alias1 -W 1 && ping -c 1 alias2 -W 1")
+	_, exitCode, err := dockerCmdWithError("run", "--rm", "busybox", "sh", "-c", "ping -c 1 alias1 -W 1 && ping -c 1 alias2 -W 1")
 
 	if exitCode == 0 {
 		c.Fatal("run ping did not fail")
@@ -24,7 +23,7 @@ func (s *DockerSuite) TestLinksPingUnlinkedContainers(c *check.C) {
 // Test for appropriate error when calling --link with an invalid target container
 func (s *DockerSuite) TestLinksInvalidContainerTarget(c *check.C) {
 
-	out, _, err := dockerCmdWithError(c, "run", "--link", "bogus:alias", "busybox", "true")
+	out, _, err := dockerCmdWithError("run", "--link", "bogus:alias", "busybox", "true")
 
 	if err == nil {
 		c.Fatal("an invalid container target should produce an error")
@@ -138,7 +137,7 @@ func (s *DockerSuite) TestLinksHostsFilesInject(c *check.C) {
 	out, _ = dockerCmd(c, "run", "-itd", "--name", "two", "--link", "one:onetwo", "busybox", "top")
 	idTwo := strings.TrimSpace(out)
 
-	time.Sleep(1 * time.Second)
+	c.Assert(waitRun(idTwo), check.IsNil)
 
 	contentOne, err := readContainerFileWithExec(idOne, "/etc/hosts")
 	if err != nil {

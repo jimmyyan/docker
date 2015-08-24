@@ -17,7 +17,7 @@ plugins.
 ## Types of plugins
 
 Plugins extend Docker's functionality.  They come in specific types.  For
-example, a [volume plugin](plugins_volume.md) might enable Docker
+example, a [volume plugin](/extend/plugins_volume) might enable Docker
 volumes to persist across multiple Docker hosts.
 
 Currently Docker supports volume and network driver plugins. In the future it
@@ -30,6 +30,12 @@ Follow the instructions in the plugin's documentation.
 ## Finding a plugin
 
 The following plugins exist:
+
+* The [Blockbridge plugin](https://github.com/blockbridge/blockbridge-docker-volume)
+  is a volume plugin that provides access to an extensible set of
+  container-based persistent storage options. It supports single and multi-host Docker
+  environments with features that include tenant isolation, automated
+  provisioning, encryption, secure deletion, snapshots and QoS.
 
 * The [Flocker plugin](https://clusterhq.com/docker-plugin/) is a volume plugin
   which provides multi-host portable volumes for Docker, enabling you to run
@@ -56,4 +62,4 @@ of the plugin for help. The Docker team may not be able to assist you.
 ## Writing a plugin
 
 If you are interested in writing a plugin for Docker, or seeing how they work
-under the hood, see the [docker plugins reference](plugin_api.md).
+under the hood, see the [docker plugins reference](/extend/plugin_api).

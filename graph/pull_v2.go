@@ -1,6 +1,7 @@
 package graph
 
 import (
+	"errors"
 	"fmt"
 	"io"
 	"io/ioutil"
@@ -95,20 +96,20 @@ func (p *v2Puller) pullV2Repository(tag string) (err error) {
 		layersDownloaded = layersDownloaded || pulledNew
 	}
 
-	WriteStatus(taggedName, p.config.OutStream, p.sf, layersDownloaded)
+	writeStatus(taggedName, p.config.OutStream, p.sf, layersDownloaded)
 
 	return nil
 }
 
 // downloadInfo is used to pass information from download to extractor
 type downloadInfo struct {
-	img      *image.Image
-	tmpFile  *os.File
-	digest   digest.Digest
-	layer    distribution.ReadSeekCloser
-	size     int64
-	err      chan error
-	verified bool
+	img     *image.Image
+	tmpFile *os.File
+	digest  digest.Digest
+	layer   distribution.ReadSeekCloser
+	size    int64
+	err     chan error
+	out     io.Writer // Download progress is written here.
 }
 
 type errVerification struct{}
@@ -118,7 +119,7 @@ func (errVerification) Error() string { return "verification failed" }
 func (p *v2Puller) download(di *downloadInfo) {
 	logrus.Debugf("pulling blob %q to %s", di.digest, di.img.ID)
 
-	out := p.config.OutStream
+	out := di.out
 
 	if c, err := p.poolAdd("pull", "img:"+di.img.ID); err != nil {
 		if c != nil {
@@ -138,6 +139,7 @@ func (p *v2Puller) download(di *downloadInfo) {
 		di.err <- err
 		return
 	}
+	di.tmpFile = tmpFile
 
 	blobs := p.repo.Blobs(nil)
 
@@ -167,7 +169,7 @@ func (p *v2Puller) download(di *downloadInfo) {
 		In:        ioutil.NopCloser(io.TeeReader(layerDownload, verifier)),
 		Out:       out,
 		Formatter: p.sf,
-		Size:      int(di.size),
+		Size:      di.size,
 		NewLines:  false,
 		ID:        stringid.TruncateID(di.img.ID),
 		Action:    "Downloading",
@@ -176,21 +178,22 @@ func (p *v2Puller) download(di *downloadInfo) {
 
 	out.Write(p.sf.FormatProgress(stringid.TruncateID(di.img.ID), "Verifying Checksum", nil))
 
-	di.verified = verifier.Verified()
-	if !di.verified {
-		logrus.Infof("Image verification failed for layer %s", di.digest)
+	if !verifier.Verified() {
+		err = fmt.Errorf("filesystem layer verification failed for digest %s", di.digest)
+		logrus.Error(err)
+		di.err <- err
+		return
 	}
 
 	out.Write(p.sf.FormatProgress(stringid.TruncateID(di.img.ID), "Download complete", nil))
 
 	logrus.Debugf("Downloaded %s to tempfile %s", di.img.ID, tmpFile.Name())
-	di.tmpFile = tmpFile
 	di.layer = layerDownload
 
 	di.err <- nil
 }
 
-func (p *v2Puller) pullV2Tag(tag, taggedName string) (bool, error) {
+func (p *v2Puller) pullV2Tag(tag, taggedName string) (verified bool, err error) {
 	logrus.Debugf("Pulling tag from V2 registry: %q", tag)
 	out := p.config.OutStream
 
@@ -203,7 +206,7 @@ func (p *v2Puller) pullV2Tag(tag, taggedName string) (bool, error) {
 	if err != nil {
 		return false, err
 	}
-	verified, err := p.validateManifest(manifest, tag)
+	verified, err = p.validateManifest(manifest, tag)
 	if err != nil {
 		return false, err
 	}
@@ -211,11 +214,32 @@ func (p *v2Puller) pullV2Tag(tag, taggedName string) (bool, error) {
 		logrus.Printf("Image manifest for %s has been verified", taggedName)
 	}
 
+	// By using a pipeWriter for each of the downloads to write their progress
+	// to, we can avoid an issue where this function returns an error but
+	// leaves behind running download goroutines. By splitting the writer
+	// with a pipe, we can close the pipe if there is any error, consequently
+	// causing each download to cancel due to an error writing to this pipe.
+	pipeReader, pipeWriter := io.Pipe()
+	go func() {
+		if _, err := io.Copy(out, pipeReader); err != nil {
+			logrus.Errorf("error copying from layer download progress reader: %s", err)
+		}
+	}()
+	defer func() {
+		if err != nil {
+			// All operations on the pipe are synchronous. This call will wait
+			// until all current readers/writers are done using the pipe then
+			// set the error. All successive reads/writes will return with this
+			// error.
+			pipeWriter.CloseWithError(errors.New("download canceled"))
+		}
+	}()
+
 	out.Write(p.sf.FormatStatus(tag, "Pulling from %s", p.repo.Name()))
 
-	downloads := make([]downloadInfo, len(manifest.FSLayers))
+	var downloads []*downloadInfo
 
-	layerIDs := []string{}
+	var layerIDs []string
 	defer func() {
 		p.graph.Release(p.sessionID, layerIDs...)
 	}()
@@ -226,69 +250,78 @@ func (p *v2Puller) pullV2Tag(tag, taggedName string) (bool, error) {
 			logrus.Debugf("error getting image v1 json: %v", err)
 			return false, err
 		}
-		downloads[i].img = img
-		downloads[i].digest = manifest.FSLayers[i].BlobSum
-
 		p.graph.Retain(p.sessionID, img.ID)
 		layerIDs = append(layerIDs, img.ID)
 
 		// Check if exists
 		if p.graph.Exists(img.ID) {
 			logrus.Debugf("Image already exists: %s", img.ID)
+			out.Write(p.sf.FormatProgress(stringid.TruncateID(img.ID), "Already exists", nil))
 			continue
 		}
-
 		out.Write(p.sf.FormatProgress(stringid.TruncateID(img.ID), "Pulling fs layer", nil))
 
-		downloads[i].err = make(chan error)
-		go p.download(&downloads[i])
+		d := &downloadInfo{
+			img:    img,
+			digest: manifest.FSLayers[i].BlobSum,
+			// TODO: seems like this chan buffer solved hanging problem in go1.5,
+			// this can indicate some deeper problem that somehow we never take
+			// error from channel in loop below
+			err: make(chan error, 1),
+			out: pipeWriter,
+		}
+		downloads = append(downloads, d)
+
+		go p.download(d)
+	}
+
+	// run clean for all downloads to prevent leftovers
+	for _, d := range downloads {
+		defer func(d *downloadInfo) {
+			if d.tmpFile != nil {
+				d.tmpFile.Close()
+				if err := os.RemoveAll(d.tmpFile.Name()); err != nil {
+					logrus.Errorf("Failed to remove temp file: %s", d.tmpFile.Name())
+				}
+			}
+		}(d)
 	}
 
 	var tagUpdated bool
-	for i := len(downloads) - 1; i >= 0; i-- {
-		d := &downloads[i]
-		if d.err != nil {
-			if err := <-d.err; err != nil {
-				return false, err
-			}
+	for _, d := range downloads {
+		if err := <-d.err; err != nil {
+			return false, err
 		}
-		verified = verified && d.verified
-		if d.layer != nil {
-			// if tmpFile is empty assume download and extracted elsewhere
-			defer os.Remove(d.tmpFile.Name())
-			defer d.tmpFile.Close()
-			d.tmpFile.Seek(0, 0)
-			if d.tmpFile != nil {
-
-				reader := progressreader.New(progressreader.Config{
-					In:        d.tmpFile,
-					Out:       out,
-					Formatter: p.sf,
-					Size:      int(d.size),
-					NewLines:  false,
-					ID:        stringid.TruncateID(d.img.ID),
-					Action:    "Extracting",
-				})
-
-				err = p.graph.Register(d.img, reader)
-				if err != nil {
-					return false, err
-				}
-
-				if err := p.graph.SetDigest(d.img.ID, d.digest); err != nil {
-					return false, err
-				}
-
-				// FIXME: Pool release here for parallel tag pull (ensures any downloads block until fully extracted)
-			}
-			out.Write(p.sf.FormatProgress(stringid.TruncateID(d.img.ID), "Pull complete", nil))
-			tagUpdated = true
-		} else {
-			out.Write(p.sf.FormatProgress(stringid.TruncateID(d.img.ID), "Already exists", nil))
+		if d.layer == nil {
+			continue
 		}
+		// if tmpFile is empty assume download and extracted elsewhere
+		d.tmpFile.Seek(0, 0)
+		reader := progressreader.New(progressreader.Config{
+			In:        d.tmpFile,
+			Out:       out,
+			Formatter: p.sf,
+			Size:      d.size,
+			NewLines:  false,
+			ID:        stringid.TruncateID(d.img.ID),
+			Action:    "Extracting",
+		})
+
+		err = p.graph.Register(d.img, reader)
+		if err != nil {
+			return false, err
+		}
+
+		if err := p.graph.SetDigest(d.img.ID, d.digest); err != nil {
+			return false, err
+		}
+
+		// FIXME: Pool release here for parallel tag pull (ensures any downloads block until fully extracted)
+		out.Write(p.sf.FormatProgress(stringid.TruncateID(d.img.ID), "Pull complete", nil))
+		tagUpdated = true
 	}
 
-	manifestDigest, err := digestFromManifest(manifest, p.repoInfo.LocalName)
+	manifestDigest, _, err := digestFromManifest(manifest, p.repoInfo.LocalName)
 	if err != nil {
 		return false, err
 	}
@@ -312,17 +345,18 @@ func (p *v2Puller) pullV2Tag(tag, taggedName string) (bool, error) {
 		out.Write(p.sf.FormatStatus(p.repo.Name()+":"+tag, "The image you are pulling has been verified. Important: image verification is a tech preview feature and should not be relied on to provide security."))
 	}
 
+	firstID := layerIDs[len(layerIDs)-1]
 	if utils.DigestReference(tag) {
 		// TODO(stevvooe): Ideally, we should always set the digest so we can
 		// use the digest whether we pull by it or not. Unfortunately, the tag
 		// store treats the digest as a separate tag, meaning there may be an
 		// untagged digest image that would seem to be dangling by a user.
-		if err = p.SetDigest(p.repoInfo.LocalName, tag, downloads[0].img.ID); err != nil {
+		if err = p.SetDigest(p.repoInfo.LocalName, tag, firstID); err != nil {
 			return false, err
 		}
 	} else {
 		// only set the repository/tag -> image ID mapping when pulling by tag (i.e. not by digest)
-		if err = p.Tag(p.repoInfo.LocalName, tag, downloads[0].img.ID, true); err != nil {
+		if err = p.Tag(p.repoInfo.LocalName, tag, firstID, true); err != nil {
 			return false, err
 		}
 	}
@@ -368,6 +402,28 @@ func (p *v2Puller) verifyTrustedKeys(namespace string, keys []libtrust.PublicKey
 }
 
 func (p *v2Puller) validateManifest(m *manifest.SignedManifest, tag string) (verified bool, err error) {
+	// If pull by digest, then verify the manifest digest. NOTE: It is
+	// important to do this first, before any other content validation. If the
+	// digest cannot be verified, don't even bother with those other things.
+	if manifestDigest, err := digest.ParseDigest(tag); err == nil {
+		verifier, err := digest.NewDigestVerifier(manifestDigest)
+		if err != nil {
+			return false, err
+		}
+		payload, err := m.Payload()
+		if err != nil {
+			return false, err
+		}
+		if _, err := verifier.Write(payload); err != nil {
+			return false, err
+		}
+		if !verifier.Verified() {
+			err := fmt.Errorf("image verification failed for digest %s", manifestDigest)
+			logrus.Error(err)
+			return false, err
+		}
+	}
+
 	// TODO(tiborvass): what's the usecase for having manifest == nil and err == nil ? Shouldn't be the error be "DoesNotExist" ?
 	if m == nil {
 		return false, fmt.Errorf("image manifest does not exist for tag %q", tag)
@@ -388,22 +444,6 @@ func (p *v2Puller) validateManifest(m *manifest.SignedManifest, tag string) (ver
 	verified, err = p.verifyTrustedKeys(m.Name, keys)
 	if err != nil {
 		return false, fmt.Errorf("error verifying manifest keys: %v", err)
-	}
-	localDigest, err := digest.ParseDigest(tag)
-	// if pull by digest, then verify
-	if err == nil {
-		verifier, err := digest.NewDigestVerifier(localDigest)
-		if err != nil {
-			return false, err
-		}
-		payload, err := m.Payload()
-		if err != nil {
-			return false, err
-		}
-		if _, err := verifier.Write(payload); err != nil {
-			return false, err
-		}
-		verified = verified && verifier.Verified()
 	}
 	return verified, nil
 }

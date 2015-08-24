@@ -3,10 +3,15 @@ package bridge
 import (
 	"errors"
 	"fmt"
+	"io/ioutil"
 	"net"
+	"os"
 	"os/exec"
+	"path/filepath"
 	"strconv"
+	"strings"
 	"sync"
+	"syscall"
 
 	"github.com/Sirupsen/logrus"
 	"github.com/docker/libnetwork/driverapi"
@@ -35,7 +40,9 @@ var (
 
 // configuration info for the "bridge" driver.
 type configuration struct {
-	EnableIPForwarding bool
+	EnableIPForwarding  bool
+	EnableIPTables      bool
+	EnableUserlandProxy bool
 }
 
 // networkConfiguration for network specific configuration
@@ -45,7 +52,6 @@ type networkConfiguration struct {
 	FixedCIDR             *net.IPNet
 	FixedCIDRv6           *net.IPNet
 	EnableIPv6            bool
-	EnableIPTables        bool
 	EnableIPMasquerade    bool
 	EnableICC             bool
 	Mtu                   int
@@ -53,7 +59,6 @@ type networkConfiguration struct {
 	DefaultGatewayIPv6    net.IP
 	DefaultBindingIP      net.IP
 	AllowNonDefaultBridge bool
-	EnableUserlandProxy   bool
 }
 
 // endpointConfiguration represents the user specified configuration for the sandbox endpoint
@@ -86,13 +91,16 @@ type bridgeNetwork struct {
 	config     *networkConfiguration
 	endpoints  map[types.UUID]*bridgeEndpoint // key: endpoint id
 	portMapper *portmapper.PortMapper
+	driver     *driver // The network's driver
 	sync.Mutex
 }
 
 type driver struct {
-	config   *configuration
-	network  *bridgeNetwork
-	networks map[types.UUID]*bridgeNetwork
+	config      *configuration
+	network     *bridgeNetwork
+	natChain    *iptables.ChainInfo
+	filterChain *iptables.ChainInfo
+	networks    map[types.UUID]*bridgeNetwork
 	sync.Mutex
 }
 
@@ -107,10 +115,13 @@ func newDriver() driverapi.Driver {
 
 // Init registers a new instance of bridge driver
 func Init(dc driverapi.DriverCallback) error {
-	// try to modprobe bridge first
-	// see gh#12177
-	if out, err := exec.Command("modprobe", "-va", "bridge", "nf_nat", "br_netfilter").CombinedOutput(); err != nil {
-		logrus.Warnf("Running modprobe bridge nf_nat br_netfilter failed with message: %s, error: %v", out, err)
+	if _, err := os.Stat("/proc/sys/net/bridge"); err != nil {
+		if out, err := exec.Command("modprobe", "-va", "bridge", "br_netfilter").CombinedOutput(); err != nil {
+			logrus.Warnf("Running modprobe bridge br_netfilter failed with message: %s, error: %v", out, err)
+		}
+	}
+	if out, err := exec.Command("modprobe", "-va", "nf_nat").CombinedOutput(); err != nil {
+		logrus.Warnf("Running modprobe nf_nat failed with message: `%s`, error: %v", strings.TrimSpace(string(out)), err)
 	}
 	if err := iptables.FirewalldInit(); err != nil {
 		logrus.Debugf("Fail to initialize firewalld: %v, using raw iptables instead", err)
@@ -215,16 +226,6 @@ func (c *networkConfiguration) fromMap(data map[string]interface{}) error {
 		}
 	}
 
-	if i, ok := data["EnableIPTables"]; ok && i != nil {
-		if s, ok := i.(string); ok {
-			if c.EnableIPTables, err = strconv.ParseBool(s); err != nil {
-				return types.BadRequestErrorf("failed to parse EnableIPTables value: %s", err.Error())
-			}
-		} else {
-			return types.BadRequestErrorf("invalid type for EnableIPTables value")
-		}
-	}
-
 	if i, ok := data["EnableIPMasquerade"]; ok && i != nil {
 		if s, ok := i.(string); ok {
 			if c.EnableIPMasquerade, err = strconv.ParseBool(s); err != nil {
@@ -326,6 +327,25 @@ func (c *networkConfiguration) fromMap(data map[string]interface{}) error {
 	return nil
 }
 
+func (n *bridgeNetwork) getDriverChains() (*iptables.ChainInfo, *iptables.ChainInfo, error) {
+	n.Lock()
+	defer n.Unlock()
+
+	if n.driver == nil {
+		return nil, nil, types.BadRequestErrorf("no driver found")
+	}
+
+	return n.driver.natChain, n.driver.filterChain, nil
+}
+
+func (n *bridgeNetwork) getNetworkBridgeName() string {
+	n.Lock()
+	config := n.config
+	n.Unlock()
+
+	return config.BridgeName
+}
+
 func (n *bridgeNetwork) getEndpoint(eid types.UUID) (*bridgeEndpoint, error) {
 	n.Lock()
 	defer n.Unlock()
@@ -410,6 +430,7 @@ func (c *networkConfiguration) conflictsWithNetworks(id types.UUID, others []*br
 
 func (d *driver) Config(option map[string]interface{}) error {
 	var config *configuration
+	var err error
 
 	d.Lock()
 	defer d.Unlock()
@@ -436,10 +457,19 @@ func (d *driver) Config(option map[string]interface{}) error {
 		d.config = config
 	} else {
 		config = &configuration{}
+		d.config = config
 	}
 
 	if config.EnableIPForwarding {
-		return setupIPForwarding(config)
+		err = setupIPForwarding()
+		if err != nil {
+			return err
+		}
+	}
+
+	if config.EnableIPTables {
+		d.natChain, d.filterChain, err = setupIPChains(config)
+		return err
 	}
 
 	return nil
@@ -472,7 +502,6 @@ func parseNetworkGenericOptions(data interface{}) (*networkConfiguration, error)
 	case map[string]interface{}:
 		config = &networkConfiguration{
 			EnableICC:          true,
-			EnableIPTables:     true,
 			EnableIPMasquerade: true,
 		}
 		err = config.fromMap(opt)
@@ -570,6 +599,7 @@ func (d *driver) CreateNetwork(id types.UUID, option map[string]interface{}) err
 		endpoints:  make(map[types.UUID]*bridgeEndpoint),
 		config:     config,
 		portMapper: portmapper.New(),
+		driver:     d,
 	}
 
 	d.Lock()
@@ -593,21 +623,18 @@ func (d *driver) CreateNetwork(id types.UUID, option map[string]interface{}) err
 	// networks. This step is needed now because driver might have now set the bridge
 	// name on this config struct. And because we need to check for possible address
 	// conflicts, so we need to check against operationa lnetworks.
-	if err := config.conflictsWithNetworks(id, networkList); err != nil {
+	if err = config.conflictsWithNetworks(id, networkList); err != nil {
 		return err
 	}
 
 	setupNetworkIsolationRules := func(config *networkConfiguration, i *bridgeInterface) error {
-		defer func() {
-			if err != nil {
-				if err := network.isolateNetwork(networkList, false); err != nil {
-					logrus.Warnf("Failed on removing the inter-network iptables rules on cleanup: %v", err)
-				}
+		if err := network.isolateNetwork(networkList, true); err != nil {
+			if err := network.isolateNetwork(networkList, false); err != nil {
+				logrus.Warnf("Failed on removing the inter-network iptables rules on cleanup: %v", err)
 			}
-		}()
-
-		err := network.isolateNetwork(networkList, true)
-		return err
+			return err
+		}
+		return nil
 	}
 
 	// Prepare the bridge setup configuration
@@ -655,10 +682,14 @@ func (d *driver) CreateNetwork(id types.UUID, option map[string]interface{}) err
 		{enableIPv6Forwarding, setupIPv6Forwarding},
 
 		// Setup Loopback Adresses Routing
-		{!config.EnableUserlandProxy, setupLoopbackAdressesRouting},
+		{!d.config.EnableUserlandProxy, setupLoopbackAdressesRouting},
 
 		// Setup IPTables.
-		{config.EnableIPTables, network.setupIPTables},
+		{d.config.EnableIPTables, network.setupIPTables},
+
+		//We want to track firewalld configuration so that
+		//if it is started/reloaded, the rules can be applied correctly
+		{d.config.EnableIPTables, network.setupFirewalld},
 
 		// Setup DefaultGatewayIPv4
 		{config.DefaultGatewayIPv4 != nil, setupGatewayIPv4},
@@ -667,10 +698,10 @@ func (d *driver) CreateNetwork(id types.UUID, option map[string]interface{}) err
 		{config.DefaultGatewayIPv6 != nil, setupGatewayIPv6},
 
 		// Add inter-network communication rules.
-		{config.EnableIPTables, setupNetworkIsolationRules},
+		{d.config.EnableIPTables, setupNetworkIsolationRules},
 
 		//Configure bridge networking filtering if ICC is off and IP tables are enabled
-		{!config.EnableICC && config.EnableIPTables, setupBridgeNetFiltering},
+		{!config.EnableICC && d.config.EnableIPTables, setupBridgeNetFiltering},
 	} {
 		if step.Condition {
 			bridgeSetup.queueStep(step.Fn)
@@ -759,17 +790,57 @@ func (d *driver) DeleteNetwork(nid types.UUID) error {
 }
 
 func addToBridge(ifaceName, bridgeName string) error {
-	iface, err := net.InterfaceByName(ifaceName)
+	link, err := netlink.LinkByName(ifaceName)
 	if err != nil {
 		return fmt.Errorf("could not find interface %s: %v", ifaceName, err)
 	}
+	if err = netlink.LinkSetMaster(link,
+		&netlink.Bridge{LinkAttrs: netlink.LinkAttrs{Name: bridgeName}}); err != nil {
+		logrus.Debugf("Failed to add %s to bridge via netlink.Trying ioctl: %v", ifaceName, err)
+		iface, err := net.InterfaceByName(ifaceName)
+		if err != nil {
+			return fmt.Errorf("could not find network interface %s: %v", ifaceName, err)
+		}
 
-	master, err := net.InterfaceByName(bridgeName)
-	if err != nil {
-		return fmt.Errorf("could not find bridge %s: %v", bridgeName, err)
+		master, err := net.InterfaceByName(bridgeName)
+		if err != nil {
+			return fmt.Errorf("could not find bridge %s: %v", bridgeName, err)
+		}
+
+		return ioctlAddToBridge(iface, master)
+	}
+	return nil
+}
+
+func setHairpinMode(link netlink.Link, enable bool) error {
+	err := netlink.LinkSetHairpin(link, enable)
+	if err != nil && err != syscall.EINVAL {
+		// If error is not EINVAL something else went wrong, bail out right away
+		return fmt.Errorf("unable to set hairpin mode on %s via netlink: %v",
+			link.Attrs().Name, err)
 	}
 
-	return ioctlAddToBridge(iface, master)
+	// Hairpin mode successfully set up
+	if err == nil {
+		return nil
+	}
+
+	// The netlink method failed with EINVAL which is probably because of an older
+	// kernel. Try one more time via the sysfs method.
+	path := filepath.Join("/sys/class/net", link.Attrs().Name, "brport/hairpin_mode")
+
+	var val []byte
+	if enable {
+		val = []byte{'1', '\n'}
+	} else {
+		val = []byte{'0', '\n'}
+	}
+
+	if err := ioutil.WriteFile(path, val, 0644); err != nil {
+		return fmt.Errorf("unable to set hairpin mode on %s via sysfs: %v", link.Attrs().Name, err)
+	}
+
+	return nil
 }
 
 func (d *driver) CreateEndpoint(nid, eid types.UUID, epInfo driverapi.EndpointInfo, epOptions map[string]interface{}) error {
@@ -789,6 +860,7 @@ func (d *driver) CreateEndpoint(nid, eid types.UUID, epInfo driverapi.EndpointIn
 	// Get the network handler and make sure it exists
 	d.Lock()
 	n, ok := d.networks[nid]
+	dconfig := d.config
 	d.Unlock()
 
 	if !ok {
@@ -901,8 +973,8 @@ func (d *driver) CreateEndpoint(nid, eid types.UUID, epInfo driverapi.EndpointIn
 		return fmt.Errorf("adding interface %s to bridge %s failed: %v", hostIfName, config.BridgeName, err)
 	}
 
-	if !config.EnableUserlandProxy {
-		err = netlink.LinkSetHairpin(host, true)
+	if !dconfig.EnableUserlandProxy {
+		err = setHairpinMode(host, true)
 		if err != nil {
 			return err
 		}
@@ -916,7 +988,7 @@ func (d *driver) CreateEndpoint(nid, eid types.UUID, epInfo driverapi.EndpointIn
 	ipv4Addr := &net.IPNet{IP: ip4, Mask: n.bridge.bridgeIPv4.Mask}
 
 	// Down the interface before configuring mac address.
-	if err := netlink.LinkSetDown(sbox); err != nil {
+	if err = netlink.LinkSetDown(sbox); err != nil {
 		return fmt.Errorf("could not set link down for container interface %s: %v", containerIfName, err)
 	}
 
@@ -929,7 +1001,7 @@ func (d *driver) CreateEndpoint(nid, eid types.UUID, epInfo driverapi.EndpointIn
 	endpoint.macAddress = mac
 
 	// Up the host interface after finishing all netlink configuration
-	if err := netlink.LinkSetUp(host); err != nil {
+	if err = netlink.LinkSetUp(host); err != nil {
 		return fmt.Errorf("could not set link up for host interface %s: %v", hostIfName, err)
 	}
 
@@ -974,7 +1046,7 @@ func (d *driver) CreateEndpoint(nid, eid types.UUID, epInfo driverapi.EndpointIn
 	}
 
 	// Program any required port mapping and store them in the endpoint
-	endpoint.portMapping, err = n.allocatePorts(epConfig, endpoint, config.DefaultBindingIP, config.EnableUserlandProxy)
+	endpoint.portMapping, err = n.allocatePorts(epConfig, endpoint, config.DefaultBindingIP, d.config.EnableUserlandProxy)
 	if err != nil {
 		return err
 	}
@@ -1057,9 +1129,9 @@ func (d *driver) DeleteEndpoint(nid, eid types.UUID) error {
 	}
 
 	// Try removal of link. Discard error: link pair might have
-	// already been deleted by sandbox delete.
-	link, err := netlink.LinkByName(ep.srcName)
-	if err == nil {
+	// already been deleted by sandbox delete. Make sure defer
+	// does not see this error either.
+	if link, err := netlink.LinkByName(ep.srcName); err == nil {
 		netlink.LinkDel(link)
 	}
 
@@ -1337,34 +1409,9 @@ func parseContainerOptions(cOptions map[string]interface{}) (*containerConfigura
 	}
 }
 
-// Generate a IEEE802 compliant MAC address from the given IP address.
-//
-// The generator is guaranteed to be consistent: the same IP will always yield the same
-// MAC address. This is to avoid ARP cache issues.
-func generateMacAddr(ip net.IP) net.HardwareAddr {
-	hw := make(net.HardwareAddr, 6)
-
-	// The first byte of the MAC address has to comply with these rules:
-	// 1. Unicast: Set the least-significant bit to 0.
-	// 2. Address is locally administered: Set the second-least-significant bit (U/L) to 1.
-	// 3. As "small" as possible: The veth address has to be "smaller" than the bridge address.
-	hw[0] = 0x02
-
-	// The first 24 bits of the MAC represent the Organizationally Unique Identifier (OUI).
-	// Since this address is locally administered, we can do whatever we want as long as
-	// it doesn't conflict with other addresses.
-	hw[1] = 0x42
-
-	// Insert the IP address into the last 32 bits of the MAC address.
-	// This is a simple way to guarantee the address will be consistent and unique.
-	copy(hw[2:], ip.To4())
-
-	return hw
-}
-
 func electMacAddress(epConfig *endpointConfiguration, ip net.IP) net.HardwareAddr {
 	if epConfig != nil && epConfig.MacAddress != nil {
 		return epConfig.MacAddress
 	}
-	return generateMacAddr(ip)
+	return netutils.GenerateMACFromIP(ip)
 }

@@ -1804,8 +1804,8 @@ func (s *DockerSuite) TestBuildForceRm(c *check.C) {
 // * Run a 1-year-long sleep from a docker build.
 // * When docker events sees container start, close the "docker build" command
 // * Wait for docker events to emit a dying event.
-func (s *DockerSuite) TestBuildCancelationKillsSleep(c *check.C) {
-	name := "testbuildcancelation"
+func (s *DockerSuite) TestBuildCancellationKillsSleep(c *check.C) {
+	name := "testbuildcancellation"
 
 	// (Note: one year, will never finish)
 	ctx, err := fakeContext("FROM busybox\nRUN sleep 31536000", nil)
@@ -4118,6 +4118,27 @@ func (s *DockerSuite) TestBuildFromGITWithContext(c *check.C) {
 	}
 }
 
+func (s *DockerSuite) TestBuildFromGITwithF(c *check.C) {
+	name := "testbuildfromgitwithf"
+	git, err := newFakeGit("repo", map[string]string{
+		"myApp/myDockerfile": `FROM busybox
+					RUN echo hi from Dockerfile`,
+	}, true)
+	if err != nil {
+		c.Fatal(err)
+	}
+	defer git.Close()
+
+	out, _, err := dockerCmdWithError("build", "-t", name, "--no-cache", "-f", "myApp/myDockerfile", git.RepoURL)
+	if err != nil {
+		c.Fatalf("Error on build. Out: %s\nErr: %v", out, err)
+	}
+
+	if !strings.Contains(out, "hi from Dockerfile") {
+		c.Fatalf("Missing expected output, got:\n%s", out)
+	}
+}
+
 func (s *DockerSuite) TestBuildFromRemoteTarball(c *check.C) {
 	name := "testbuildfromremotetarball"
 
@@ -4343,7 +4364,7 @@ func (s *DockerSuite) TestBuildEntrypointInheritance(c *check.C) {
 		c.Fatal(err)
 	}
 
-	if _, status, _ := dockerCmdWithError(c, "run", "parent"); status != 130 {
+	if _, status, _ := dockerCmdWithError("run", "parent"); status != 130 {
 		c.Fatalf("expected exit code 130 but received %d", status)
 	}
 
@@ -4354,7 +4375,7 @@ func (s *DockerSuite) TestBuildEntrypointInheritance(c *check.C) {
 		c.Fatal(err)
 	}
 
-	if _, status, _ := dockerCmdWithError(c, "run", "child"); status != 5 {
+	if _, status, _ := dockerCmdWithError("run", "child"); status != 5 {
 		c.Fatalf("expected exit code 5 but received %d", status)
 	}
 
@@ -4450,7 +4471,7 @@ func (s *DockerSuite) TestBuildVerifySingleQuoteFails(c *check.C) {
 		c.Fatal(err)
 	}
 
-	if _, _, err := dockerCmdWithError(c, "run", "--rm", name); err == nil {
+	if _, _, err := dockerCmdWithError("run", "--rm", name); err == nil {
 		c.Fatal("The image was not supposed to be able to run")
 	}
 
@@ -4996,7 +5017,7 @@ func (s *DockerSuite) TestBuildDockerfileOutsideContext(c *check.C) {
 		filepath.Join(ctx, "dockerfile1"),
 		filepath.Join(ctx, "dockerfile2"),
 	} {
-		out, _, err := dockerCmdWithError(c, "build", "-t", name, "--no-cache", "-f", dockerfilePath, ".")
+		out, _, err := dockerCmdWithError("build", "-t", name, "--no-cache", "-f", dockerfilePath, ".")
 		if err == nil {
 			c.Fatalf("Expected error with %s. Out: %s", dockerfilePath, out)
 		}
@@ -5010,7 +5031,7 @@ func (s *DockerSuite) TestBuildDockerfileOutsideContext(c *check.C) {
 
 	// Path to Dockerfile should be resolved relative to working directory, not relative to context.
 	// There is a Dockerfile in the context, but since there is no Dockerfile in the current directory, the following should fail
-	out, _, err := dockerCmdWithError(c, "build", "-t", name, "--no-cache", "-f", "Dockerfile", ctx)
+	out, _, err := dockerCmdWithError("build", "-t", name, "--no-cache", "-f", "Dockerfile", ctx)
 	if err == nil {
 		c.Fatalf("Expected error. Out: %s", out)
 	}
@@ -5263,7 +5284,7 @@ func (s *DockerSuite) TestBuildContainerWithCgroupParent(c *check.C) {
 	selfCgroupPaths := parseCgroupPaths(string(data))
 	_, found := selfCgroupPaths["memory"]
 	if !found {
-		c.Fatalf("unable to find self cpu cgroup path. CgroupsPath: %v", selfCgroupPaths)
+		c.Fatalf("unable to find self memory cgroup path. CgroupsPath: %v", selfCgroupPaths)
 	}
 	cmd := exec.Command(dockerBinary, "build", "--cgroup-parent", cgroupParent, "-")
 	cmd.Stdin = strings.NewReader(`
@@ -5274,6 +5295,11 @@ RUN cat /proc/self/cgroup
 	out, _, err := runCommandWithOutput(cmd)
 	if err != nil {
 		c.Fatalf("unexpected failure when running container with --cgroup-parent option - %s\n%v", string(out), err)
+	}
+	m, err := regexp.MatchString(fmt.Sprintf("memory:.*/%s/.*", cgroupParent), out)
+	c.Assert(err, check.IsNil)
+	if !m {
+		c.Fatalf("There is no expected memory cgroup with parent /%s/: %s", cgroupParent, out)
 	}
 }
 
@@ -5327,4 +5353,117 @@ func (s *DockerSuite) TestBuildRUNErrMsg(c *check.C) {
 	if !strings.Contains(out, exp) {
 		c.Fatalf("RUN doesn't have the correct output:\nGot:%s\nExpected:%s", out, exp)
 	}
+}
+
+func (s *DockerTrustSuite) TestTrustedBuild(c *check.C) {
+	repoName := s.setupTrustedImage(c, "trusted-build")
+	dockerFile := fmt.Sprintf(`
+  FROM %s
+  RUN []
+    `, repoName)
+
+	name := "testtrustedbuild"
+
+	buildCmd := buildImageCmd(name, dockerFile, true)
+	s.trustedCmd(buildCmd)
+	out, _, err := runCommandWithOutput(buildCmd)
+	if err != nil {
+		c.Fatalf("Error running trusted build: %s\n%s", err, out)
+	}
+
+	if !strings.Contains(out, fmt.Sprintf("FROM %s@sha", repoName[:len(repoName)-7])) {
+		c.Fatalf("Unexpected output on trusted build:\n%s", out)
+	}
+
+	// We should also have a tag reference for the image.
+	if out, exitCode := dockerCmd(c, "inspect", repoName); exitCode != 0 {
+		c.Fatalf("unexpected exit code inspecting image %q: %d: %s", repoName, exitCode, out)
+	}
+
+	// We should now be able to remove the tag reference.
+	if out, exitCode := dockerCmd(c, "rmi", repoName); exitCode != 0 {
+		c.Fatalf("unexpected exit code inspecting image %q: %d: %s", repoName, exitCode, out)
+	}
+}
+
+func (s *DockerTrustSuite) TestTrustedBuildUntrustedTag(c *check.C) {
+	repoName := fmt.Sprintf("%v/dockercli/build-untrusted-tag:latest", privateRegistryURL)
+	dockerFile := fmt.Sprintf(`
+  FROM %s
+  RUN []
+    `, repoName)
+
+	name := "testtrustedbuilduntrustedtag"
+
+	buildCmd := buildImageCmd(name, dockerFile, true)
+	s.trustedCmd(buildCmd)
+	out, _, err := runCommandWithOutput(buildCmd)
+	if err == nil {
+		c.Fatalf("Expected error on trusted build with untrusted tag: %s\n%s", err, out)
+	}
+
+	if !strings.Contains(out, fmt.Sprintf("no trust data available")) {
+		c.Fatalf("Unexpected output on trusted build with untrusted tag:\n%s", out)
+	}
+}
+
+func (s *DockerTrustSuite) TestBuildContextDirIsSymlink(c *check.C) {
+	tempDir, err := ioutil.TempDir("", "test-build-dir-is-symlink-")
+	if err != nil {
+		c.Fatal(err)
+	}
+	defer os.RemoveAll(tempDir)
+
+	// Make a real context directory in this temp directory with a simple
+	// Dockerfile.
+	realContextDirname := filepath.Join(tempDir, "context")
+	if err := os.Mkdir(realContextDirname, os.FileMode(0755)); err != nil {
+		c.Fatal(err)
+	}
+
+	if err = ioutil.WriteFile(
+		filepath.Join(realContextDirname, "Dockerfile"),
+		[]byte(`
+			FROM busybox
+			RUN echo hello world
+		`),
+		os.FileMode(0644),
+	); err != nil {
+		c.Fatal(err)
+	}
+
+	// Make a symlink to the real context directory.
+	contextSymlinkName := filepath.Join(tempDir, "context_link")
+	if err := os.Symlink(realContextDirname, contextSymlinkName); err != nil {
+		c.Fatal(err)
+	}
+
+	// Executing the build with the symlink as the specified context should
+	// *not* fail.
+	if out, exitStatus := dockerCmd(c, "build", contextSymlinkName); exitStatus != 0 {
+		c.Fatalf("build failed with exit status %d: %s", exitStatus, out)
+	}
+}
+
+// Issue #15634: COPY fails when path starts with "null"
+func (s *DockerSuite) TestBuildNullStringInAddCopyVolume(c *check.C) {
+	name := "testbuildnullstringinaddcopyvolume"
+
+	ctx, err := fakeContext(`
+		FROM busybox
+		
+		ADD null /
+		COPY nullfile /
+		VOLUME nullvolume
+		`,
+		map[string]string{
+			"null":     "test1",
+			"nullfile": "test2",
+		},
+	)
+	defer ctx.Close()
+	c.Assert(err, check.IsNil)
+
+	_, err = buildImageFromContext(name, ctx, true)
+	c.Assert(err, check.IsNil)
 }

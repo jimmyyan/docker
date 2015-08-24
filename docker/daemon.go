@@ -8,11 +8,11 @@ import (
 	"io"
 	"os"
 	"path/filepath"
-	"runtime"
 	"strings"
 	"time"
 
 	"github.com/Sirupsen/logrus"
+	"github.com/docker/distribution/uuid"
 	apiserver "github.com/docker/docker/api/server"
 	"github.com/docker/docker/autogen/dockerversion"
 	"github.com/docker/docker/cli"
@@ -76,6 +76,7 @@ func NewDaemonCli() *DaemonCli {
 
 	// TODO(tiborvass): remove InstallFlags?
 	daemonConfig := new(daemon.Config)
+	daemonConfig.LogConfig.Config = make(map[string]string)
 	daemonConfig.InstallFlags(daemonFlags, presentInHelp)
 	daemonConfig.InstallFlags(flag.CommandLine, absentFromHelp)
 	registryOptions := new(registry.Options)
@@ -100,6 +101,7 @@ func migrateKey() (err error) {
 				err = os.Remove(oldPath)
 			} else {
 				logrus.Warnf("Key migration failed, key file not removed at %s", oldPath)
+				os.Remove(newPath)
 			}
 		}()
 
@@ -154,6 +156,9 @@ func getGlobalFlag() (globalFlag *flag.Flag) {
 
 // CmdDaemon is the daemon command, called the raw arguments after `docker daemon`.
 func (cli *DaemonCli) CmdDaemon(args ...string) error {
+	// warn from uuid package when running the daemon
+	uuid.Loggerf = logrus.Warnf
+
 	if *flDaemon {
 		// allow legacy forms `docker -D -d` and `docker -d -D`
 		logrus.Warn("please use 'docker daemon' instead.")
@@ -193,7 +198,7 @@ func (cli *DaemonCli) CmdDaemon(args ...string) error {
 		}
 	}
 
-	var pfile *pidfile.PidFile
+	var pfile *pidfile.PIDFile
 	if cli.Pidfile != "" {
 		pf, err := pidfile.New(cli.Pidfile)
 		if err != nil {
@@ -207,15 +212,9 @@ func (cli *DaemonCli) CmdDaemon(args ...string) error {
 		}()
 	}
 
-	if cli.LogConfig.Config == nil {
-		cli.LogConfig.Config = make(map[string]string)
-	}
-
-	serverConfig := &apiserver.ServerConfig{
-		Logging:     true,
-		EnableCors:  cli.EnableCors,
-		CorsHeaders: cli.CorsHeaders,
-		Version:     dockerversion.VERSION,
+	serverConfig := &apiserver.Config{
+		Logging: true,
+		Version: dockerversion.VERSION,
 	}
 	serverConfig = setPlatformServerConfig(serverConfig, cli.Config)
 
@@ -226,7 +225,7 @@ func (cli *DaemonCli) CmdDaemon(args ...string) error {
 		}
 		tlsConfig, err := tlsconfig.Server(*commonFlags.TLSOptions)
 		if err != nil {
-			logrus.Fatalf("foobar: %v", err)
+			logrus.Fatal(err)
 		}
 		serverConfig.TLSConfig = tlsConfig
 	}
@@ -238,7 +237,7 @@ func (cli *DaemonCli) CmdDaemon(args ...string) error {
 	// daemon doesn't exit
 	serveAPIWait := make(chan error)
 	go func() {
-		if err := api.ServeApi(commonFlags.Hosts); err != nil {
+		if err := api.ServeAPI(commonFlags.Hosts); err != nil {
 			logrus.Errorf("ServeAPI error: %v", err)
 			serveAPIWait <- err
 			return
@@ -312,16 +311,8 @@ func shutdownDaemon(d *daemon.Daemon, timeout time.Duration) {
 	}()
 	select {
 	case <-ch:
-		logrus.Debug("Clean shutdown succeded")
+		logrus.Debug("Clean shutdown succeeded")
 	case <-time.After(timeout * time.Second):
 		logrus.Error("Force shutdown daemon")
 	}
-}
-
-func getDaemonConfDir() string {
-	// TODO: update for Windows daemon
-	if runtime.GOOS == "windows" {
-		return cliconfig.ConfigDir()
-	}
-	return "/etc/docker"
 }

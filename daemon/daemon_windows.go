@@ -5,67 +5,23 @@ import (
 	"os"
 	"syscall"
 
-	"github.com/Sirupsen/logrus"
 	"github.com/docker/docker/daemon/graphdriver"
-	"github.com/docker/docker/daemon/graphdriver/windows"
-	"github.com/docker/docker/pkg/archive"
+	_ "github.com/docker/docker/daemon/graphdriver/windows"
 	"github.com/docker/docker/pkg/parsers"
 	"github.com/docker/docker/runconfig"
 	"github.com/docker/libnetwork"
-	"github.com/microsoft/hcsshim"
 )
 
-const DefaultVirtualSwitch = "Virtual Switch"
-
-func (daemon *Daemon) Changes(container *Container) ([]archive.Change, error) {
-	return daemon.driver.Changes(container.ID, container.ImageID)
-}
-
-func (daemon *Daemon) Diff(container *Container) (archive.Archive, error) {
-	return daemon.driver.Diff(container.ID, container.ImageID)
-}
+const (
+	DefaultVirtualSwitch = "Virtual Switch"
+	platformSupported    = true
+)
 
 func parseSecurityOpt(container *Container, config *runconfig.HostConfig) error {
 	return nil
 }
 
-func (daemon *Daemon) createRootfs(container *Container) error {
-	// Step 1: create the container directory.
-	// This doubles as a barrier to avoid race conditions.
-	if err := os.Mkdir(container.root, 0700); err != nil {
-		return err
-	}
-
-	if wd, ok := daemon.driver.(*windows.WindowsGraphDriver); ok {
-		if container.ImageID != "" {
-			// Get list of paths to parent layers.
-			logrus.Debugln("createRootfs: Container has parent image:", container.ImageID)
-			img, err := daemon.graph.Get(container.ImageID)
-			if err != nil {
-				return err
-			}
-
-			ids, err := daemon.graph.ParentLayerIds(img)
-			if err != nil {
-				return err
-			}
-			logrus.Debugf("Got image ids: %d", len(ids))
-
-			if err := hcsshim.CreateSandboxLayer(wd.Info(), container.ID, container.ImageID, wd.LayerIdsToPaths(ids)); err != nil {
-				return err
-			}
-		} else {
-			if err := daemon.driver.Create(container.ID, container.ImageID); err != nil {
-				return err
-			}
-		}
-	} else {
-		// Fall-back code path to allow the use of the VFS driver for development
-		if err := daemon.driver.Create(container.ID, container.ImageID); err != nil {
-			return err
-		}
-
-	}
+func setupInitLayer(initLayer string) error {
 	return nil
 }
 
@@ -73,8 +29,14 @@ func checkKernel() error {
 	return nil
 }
 
-func (daemon *Daemon) verifyContainerSettings(hostConfig *runconfig.HostConfig, config *runconfig.Config) ([]string, error) {
-	// TODO Windows. Verifications TBC
+// adaptContainerSettings is called during container creation to modify any
+// settings necessary in the HostConfig structure.
+func (daemon *Daemon) adaptContainerSettings(hostConfig *runconfig.HostConfig, adjustCPUShares bool) {
+}
+
+// verifyPlatformContainerSettings performs platform-specific validation of the
+// hostconfig and config structures.
+func verifyPlatformContainerSettings(daemon *Daemon, hostConfig *runconfig.HostConfig, config *runconfig.Config) ([]string, error) {
 	return nil, nil
 }
 
@@ -164,4 +126,15 @@ func (daemon *Daemon) RegisterLinks(container *Container, hostConfig *runconfig.
 		return err
 	}
 	return nil
+}
+
+func (daemon *Daemon) newBaseContainer(id string) Container {
+	return Container{
+		CommonContainer: CommonContainer{
+			ID:           id,
+			State:        NewState(),
+			execCommands: newExecStore(),
+			root:         daemon.containerRoot(id),
+		},
+	}
 }

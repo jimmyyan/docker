@@ -51,6 +51,11 @@ List containers
                  "Created": 1367854155,
                  "Status": "Exit 0",
                  "Ports": [{"PrivatePort": 2222, "PublicPort": 3333, "Type": "tcp"}],
+                 "Labels": {
+                         "com.example.vendor": "Acme",
+                         "com.example.license": "GPL",
+                         "com.example.version": "1.0"
+                 },
                  "SizeRw": 12288,
                  "SizeRootFs": 0
          },
@@ -62,6 +67,7 @@ List containers
                  "Created": 1367854155,
                  "Status": "Exit 0",
                  "Ports": [],
+                 "Labels": {},
                  "SizeRw": 12288,
                  "SizeRootFs": 0
          },
@@ -73,6 +79,7 @@ List containers
                  "Created": 1367854154,
                  "Status": "Exit 0",
                  "Ports":[],
+                 "Labels": {},
                  "SizeRw":12288,
                  "SizeRootFs":0
          },
@@ -84,6 +91,7 @@ List containers
                  "Created": 1367854152,
                  "Status": "Exit 0",
                  "Ports": [],
+                 "Labels": {},
                  "SizeRw": 12288,
                  "SizeRootFs": 0
          }
@@ -104,7 +112,7 @@ Query Parameters:
 -   **filters** - a JSON encoded value of the filters (a `map[string][]string`) to process on the containers list. Available filters:
   -   `exited=<int>`; -- containers with exit code of  `<int>` ;
   -   `status=`(`created`|`restarting`|`running`|`paused`|`exited`)
-  -   `label=key` or `key=value` of a container label
+  -   `label=key` or `label="key=value"` of a container label
 
 Status Codes:
 
@@ -1078,7 +1086,7 @@ Status Codes:
 `HEAD /containers/(id)/archive`
 
 See the description of the `X-Docker-Container-Path-Stat` header in the
-folowing section.
+following section.
 
 ### Get an archive of a filesystem resource in a container
 
@@ -1109,7 +1117,7 @@ Query Parameters:
 
         HTTP/1.1 200 OK
         Content-Type: application/x-tar
-        X-Docker-Container-Path-Stat: eyJuYW1lIjoicm9vdCIsInBhdGgiOiIvcm9vdCIsInNpemUiOjQwOTYsIm1vZGUiOjIxNDc0ODQwOTYsIm10aW1lIjoiMjAxNC0wMi0yN1QyMDo1MToyM1oifQ==
+        X-Docker-Container-Path-Stat: eyJuYW1lIjoicm9vdCIsInNpemUiOjQwOTYsIm1vZGUiOjIxNDc0ODQwOTYsIm10aW1lIjoiMjAxNC0wMi0yN1QyMDo1MToyM1oiLCJsaW5rVGFyZ2V0IjoiIn0=
 
         {{ TAR STREAM }}
 
@@ -1120,10 +1128,10 @@ JSON object (whitespace added for readability):
 
         {
             "name": "root",
-            "path": "/root",
             "size": 4096,
             "mode": 2147484096,
-            "mtime": "2014-02-27T20:51:23Z"
+            "mtime": "2014-02-27T20:51:23Z",
+            "linkTarget": ""
         }
 
 A `HEAD` request can also be made to this endpoint if only this information is
@@ -1272,7 +1280,7 @@ Query Parameters:
 -   **all** – 1/True/true or 0/False/false, default false
 -   **filters** – a JSON encoded value of the filters (a map[string][]string) to process on the images list. Available filters:
   -   `dangling=true`
-  -   `label=key` or `key=value` of an image label
+  -   `label=key` or `label="key=value"` of an image label
 -   **filter** - only return images with the specified name
 
 ### Build image from a Dockerfile

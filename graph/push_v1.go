@@ -29,7 +29,7 @@ type v1Pusher struct {
 }
 
 func (p *v1Pusher) Push() (fallback bool, err error) {
-	tlsConfig, err := p.registryService.TlsConfig(p.repoInfo.Index.Name)
+	tlsConfig, err := p.registryService.TLSConfig(p.repoInfo.Index.Name)
 	if err != nil {
 		return false, err
 	}
@@ -289,7 +289,7 @@ func (p *v1Pusher) pushImage(imgID, ep string, token []string) (checksum string,
 			In:        layerData,
 			Out:       p.out,
 			Formatter: p.sf,
-			Size:      int(layerData.Size),
+			Size:      layerData.Size,
 			NewLines:  false,
 			ID:        stringid.TruncateID(imgData.ID),
 			Action:    "Pushing",

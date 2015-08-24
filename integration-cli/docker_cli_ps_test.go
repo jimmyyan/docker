@@ -2,7 +2,10 @@ package main
 
 import (
 	"fmt"
+	"io/ioutil"
+	"os"
 	"os/exec"
+	"path/filepath"
 	"reflect"
 	"strconv"
 	"strings"
@@ -27,17 +30,13 @@ func (s *DockerSuite) TestPsListContainers(c *check.C) {
 	fourthID := strings.TrimSpace(out)
 
 	// make sure the second is running
-	if err := waitRun(secondID); err != nil {
-		c.Fatalf("waiting for container failed: %v", err)
-	}
+	c.Assert(waitRun(secondID), check.IsNil)
 
 	// make sure third one is not running
 	dockerCmd(c, "wait", thirdID)
 
 	// make sure the forth is running
-	if err := waitRun(fourthID); err != nil {
-		c.Fatalf("waiting for container failed: %v", err)
-	}
+	c.Assert(waitRun(fourthID), check.IsNil)
 
 	// all
 	out, _ = dockerCmd(c, "ps", "-a")
@@ -337,7 +336,7 @@ func (s *DockerSuite) TestPsListContainersFilterExited(c *check.C) {
 		c.Fatal(err)
 	}
 
-	if out, _, err := dockerCmdWithError(c, "run", "--name", "nonzero1", "busybox", "false"); err == nil {
+	if out, _, err := dockerCmdWithError("run", "--name", "nonzero1", "busybox", "false"); err == nil {
 		c.Fatal("Should fail.", out, err)
 	}
 
@@ -346,7 +345,7 @@ func (s *DockerSuite) TestPsListContainersFilterExited(c *check.C) {
 		c.Fatal(err)
 	}
 
-	if out, _, err := dockerCmdWithError(c, "run", "--name", "nonzero2", "busybox", "false"); err == nil {
+	if out, _, err := dockerCmdWithError("run", "--name", "nonzero2", "busybox", "false"); err == nil {
 		c.Fatal("Should fail.", out, err)
 	}
 	secondNonZero, err := getIDByName("nonzero2")
@@ -552,5 +551,25 @@ func (s *DockerSuite) TestPsFormatHeaders(c *check.C) {
 	out, _ = dockerCmd(c, "ps", "--format", "table {{.Names}}")
 	if out != "NAMES\ntest\n" {
 		c.Fatalf(`Expected 'NAMES\ntest\n', got %v`, out)
+	}
+}
+
+func (s *DockerSuite) TestPsDefaultFormatAndQuiet(c *check.C) {
+	config := `{
+		"psFormat": "{{ .ID }} default"
+}`
+	d, err := ioutil.TempDir("", "integration-cli-")
+	c.Assert(err, check.IsNil)
+	defer os.RemoveAll(d)
+
+	err = ioutil.WriteFile(filepath.Join(d, "config.json"), []byte(config), 0644)
+	c.Assert(err, check.IsNil)
+
+	out, _ := dockerCmd(c, "run", "--name=test", "-d", "busybox", "top")
+	id := strings.TrimSpace(out)
+
+	out, _ = dockerCmd(c, "--config", d, "ps", "-q")
+	if !strings.HasPrefix(id, strings.TrimSpace(out)) {
+		c.Fatalf("Expected to print only the container id, got %v\n", out)
 	}
 }

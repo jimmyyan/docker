@@ -21,21 +21,24 @@ APTDIR=$DOCKER_RELEASE_DIR/apt/repo
 mkdir -p "$APTDIR/conf" "$APTDIR/db"
 
 # create/update distributions file
-for suite in $(exec contrib/reprepro/suites.sh); do
-	cat <<-EOF
-	Origin: Docker
-	Suite: $suite
-	Codename: $suite
-	Architectures: amd64 i386
-	Components: main testing experimental
-	Description: Docker APT Repository
+if [[ ! -f "$APTDIR/conf/distributions" ]]; then
+	for suite in $(exec contrib/reprepro/suites.sh); do
+		cat <<-EOF
+		Origin: Docker
+		Suite: $suite
+		Codename: $suite
+		Architectures: amd64 i386
+		Components: main testing experimental
+		Description: Docker APT Repository
 
-	EOF
-done > "$APTDIR/conf/distributions"
+		EOF
+	done > "$APTDIR/conf/distributions"
+fi
 
 # set the component and priority for the version being released
 component="main"
 priority=700
+options="--keepunreferencedfiles"
 
 if [[ "$VERSION" == *-rc* ]]; then
 	component="testing"
@@ -45,6 +48,7 @@ fi
 if [ $DOCKER_EXPERIMENTAL ] || [[ "$VERSION" == *-dev ]] || [ -n "$(git status --porcelain)" ]; then
 	component="experimental"
 	priority=600
+	options=
 fi
 
 # release the debs
@@ -62,7 +66,7 @@ for dir in contrib/builder/deb/*/; do
 			-k releasedocker --sign builder "${DEBFILE[@]}"
 	fi
 
-	reprepro -v --keepunreferencedfiles \
+	reprepro -v $options \
 		-S docker-engine -P "$priority" -C "$component" \
 		-b "$APTDIR" includedeb "$codename" "${DEBFILE[@]}"
 done

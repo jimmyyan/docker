@@ -29,7 +29,7 @@ you continue working with your fork on this branch.
 
 ##  Clean your host of Docker artifacts
 
-Docker developers run the latest stable release of the Docker software (with Boot2Docker if their machine is Mac OS X). They clean their local
+Docker developers run the latest stable release of the Docker software (with Docker Machine if their machine is Mac OS X). They clean their local
 hosts of unnecessary Docker artifacts such as stopped containers or unused
 images. Cleaning unnecessary artifacts isn't strictly necessary, but it is
 good practice, so it is included here.
@@ -96,9 +96,9 @@ environment.
 
 1. Open a terminal.
 
-    Mac users, use `boot2docker status` to make sure Boot2Docker is running. You
-    may need to run `eval "$(boot2docker shellinit)"` to initialize your shell
-    environment.
+    Mac users, use `docker-machine status your_vm_name` to make sure your VM is running. You
+    may need to run `eval "$(docker-machine env your_vm_name)"` to initialize your
+    shell environment.
 
 3. Change into the root of your forked repository.
 
@@ -193,7 +193,7 @@ environment.
     Keeping the ancestor images improves the build performance. When you rebuild
     the child image, the build process uses the local ancestors rather than
     retrieving them from the Hub. The build process gets new ancestors only if
-    DockerHub has updated versions.
+    Docker Hub has updated versions.
 
 ## Start a container and run a test
 
@@ -207,8 +207,8 @@ build and run a `docker` binary in your container.
 
     ![Multiple terminals](/project/images/three_terms.png)
 
-    Mac OS X users, make sure you run `eval "$(boot2docker shellinit)"` in any new
-    terminals.
+    Mac OS X users, make sure you run `eval "$(docker-machine env your_vm_name)"` in
+    any new terminals.
 
 2. In a terminal, create a new container from your `dry-run-test` image.
 
